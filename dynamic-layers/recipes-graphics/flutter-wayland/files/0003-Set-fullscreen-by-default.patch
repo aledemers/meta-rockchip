@@ -1,0 +1,162 @@
+From 366c8e55f37de774b13b23d09c3ebe8501f71ff4 Mon Sep 17 00:00:00 2001
+From: Jeffy Chen <jeffy.chen@rock-chips.com>
+Date: Mon, 8 Jun 2020 17:43:04 +0800
+Subject: [PATCH 3/3] Set fullscreen by default
+
+Signed-off-by: Jeffy Chen <jeffy.chen@rock-chips.com>
+---
+ src/main.cc            | 14 +++++++-------
+ src/wayland_display.cc | 36 ++++++++++++++++++++++++++----------
+ src/wayland_display.h  |  8 ++++----
+ 3 files changed, 37 insertions(+), 21 deletions(-)
+
+diff --git a/src/main.cc b/src/main.cc
+index cac43e8..329fc4a 100644
+--- a/src/main.cc
++++ b/src/main.cc
+@@ -54,8 +54,13 @@ static bool Main(std::vector<std::string> args) {
+     return false;
+   }
+ 
+-  const size_t kWidth = 640;
+-  const size_t kHeight = 480;
++  size_t kWidth = 640;
++  size_t kHeight = 480;
++
++  if (getenv("FLUTTER_WAYLAND_FULLSCREEN")) {
++    kWidth = 0;
++    kHeight = 0;
++  }
+ 
+   for (const auto& arg : args) {
+     FLWAY_LOG << "Arg: " << arg << std::endl;
+@@ -74,11 +79,6 @@ static bool Main(std::vector<std::string> args) {
+     return false;
+   }
+ 
+-  if (!display.SetWindowSize(kWidth, kHeight)) {
+-    FLWAY_ERROR << "Could not update Flutter application size." << std::endl;
+-    return false;
+-  }
+-
+   display.Run();
+ 
+   return true;
+diff --git a/src/wayland_display.cc b/src/wayland_display.cc
+index f8b5666..565013c 100644
+--- a/src/wayland_display.cc
++++ b/src/wayland_display.cc
+@@ -154,11 +154,11 @@ bool WaylandDisplay::IsValid() const {
+   return valid_;
+ }
+ 
+-bool WaylandDisplay::SetWindowSize(size_t width, size_t height) {
++bool WaylandDisplay::SetWindowSize() {
+   FlutterWindowMetricsEvent event = {};
+   event.struct_size = sizeof(event);
+-  event.width = width;
+-  event.height = height;
++  event.width = screen_width_;
++  event.height = screen_height_;
+   event.pixel_ratio = 1.0;
+   return FlutterEngineSendWindowMetricsEvent(engine_, &event) == kSuccess;
+ }
+@@ -168,11 +168,6 @@ WaylandDisplay::WaylandDisplay(size_t width,
+                                std::string bundle_path,
+                                const std::vector<std::string>& args)
+     : screen_width_(width), screen_height_(height) {
+-  if (screen_width_ == 0 || screen_height_ == 0) {
+-    FLWAY_ERROR << "Invalid screen dimensions." << std::endl;
+-    return;
+-  }
+-
+   // retrieve global objects
+   registry = display.get_registry();
+   registry.on_global() = [&](uint32_t name, std::string interface,
+@@ -200,7 +195,7 @@ WaylandDisplay::WaylandDisplay(size_t width,
+   surface = compositor.create_surface();
+ 
+   // create a shell surface
+-  if (xdg_wm_base) {
++  if (screen_width_ && screen_height_ && xdg_wm_base) {
+     xdg_wm_base.on_ping() = [&](uint32_t serial) { xdg_wm_base.pong(serial); };
+     xdg_surface = xdg_wm_base.get_xdg_surface(surface);
+     xdg_surface.on_configure() = [&](uint32_t serial) {
+@@ -210,12 +205,28 @@ WaylandDisplay::WaylandDisplay(size_t width,
+     xdg_toplevel.set_title("Window");
+     xdg_toplevel.on_close() = [&]() { running = false; };
+   } else {
++    bool need_configure = !screen_width_ || !screen_height_;
++
+     shell_surface = shell.get_shell_surface(surface);
+     shell_surface.on_ping() = [&](uint32_t serial) {
+       shell_surface.pong(serial);
+     };
+     shell_surface.set_title("Flutter");
+-    shell_surface.set_toplevel();
++
++    shell_surface.on_configure() = [&](shell_surface_resize edges, int32_t width, int32_t height) {
++      screen_width_ = width;
++      screen_height_ = height;
++      need_configure = false;
++    };
++
++    if (!need_configure)
++      shell_surface.set_toplevel();
++    else
++      shell_surface.set_fullscreen(shell_surface_fullscreen_method::scale,
++                                   0, NULL);
++
++    while (need_configure)
++      display.roundtrip();
+   }
+   surface.commit();
+ 
+@@ -466,6 +477,11 @@ bool WaylandDisplay::Run() {
+     return false;
+   }
+ 
++  if (!SetWindowSize()) {
++    FLWAY_ERROR << "Could not update Flutter application size." << std::endl;
++    return false;
++  }
++
+   running = true;
+ 
+   // event loop
+diff --git a/src/wayland_display.h b/src/wayland_display.h
+index 2db4cfc..2958c49 100644
+--- a/src/wayland_display.h
++++ b/src/wayland_display.h
+@@ -41,8 +41,6 @@ class WaylandDisplay {
+   void InitializeApplication(std::string bundle_path,
+                              const std::vector<std::string>& args);
+ 
+-  bool SetWindowSize(size_t width, size_t height);
+-
+   bool Run();
+ 
+  private:
+@@ -77,8 +75,8 @@ class WaylandDisplay {
+   bool has_touch;
+ 
+   bool valid_ = false;
+-  const int screen_width_;
+-  const int screen_height_;
++  int screen_width_;
++  int screen_height_;
+   int32_t cur_x;
+   int32_t cur_y;
+ 
+@@ -86,6 +84,8 @@ class WaylandDisplay {
+   PlatformChannel platform_channel_;
+   int last_button_ = 0;
+ 
++  bool SetWindowSize();
++
+   void init_egl();
+ 
+   bool GLMakeCurrent();
+-- 
+2.20.1
+
